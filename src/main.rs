@@ -68,6 +68,16 @@ fn load_config() -> Result<Config, String> {
     toml::from_str(&content).map_err(|e| format!("Failed to parse '{}'. {}", CONFIG_FILENAME, e))
 }
 
+fn save_config(config: &Config) -> Result<(), String> {
+    let toml_string =
+        toml::to_string(config).map_err(|e| format!("Failed to serialize configuration. {}", e))?;
+
+    fs::write(CONFIG_FILENAME, toml_string)
+        .map_err(|e| format!("Failed to write to '{}'. {}", CONFIG_FILENAME, e))?;
+
+    Ok(())
+}
+
 fn list_aliases() -> Result<(), String> {
     let config = load_config()?;
 
@@ -135,11 +145,8 @@ fn add_alias(alias: &str, command: &str) -> Result<(), String> {
     config
         .aliases
         .insert(alias.to_string(), command.to_string());
-    let toml_string = toml::to_string(&config)
-        .map_err(|e| format!("Failed to serialize configuration. {}", e))?;
 
-    fs::write(CONFIG_FILENAME, toml_string)
-        .map_err(|e| format!("Failed to write to '{}'. {}", CONFIG_FILENAME, e))?;
+    save_config(&config)?;
 
     println!("Successfully added alias '{}'.", alias);
 
@@ -150,11 +157,7 @@ fn remove_alias(alias: &str) -> Result<(), String> {
     let mut config = load_config()?;
 
     if config.aliases.remove(alias).is_some() {
-        let toml_string = toml::to_string(&config)
-            .map_err(|e| format!("Failed to serialize configuration. {}", e))?;
-
-        fs::write(CONFIG_FILENAME, toml_string)
-            .map_err(|e| format!("Failed to write to '{}'. {}", CONFIG_FILENAME, e))?;
+        save_config(&config)?;
 
         println!("Successfully removed alias '{}'.", alias);
 
@@ -172,11 +175,7 @@ fn edit_alias(alias: &str, new_command: &str) -> Result<(), String> {
             .aliases
             .insert(alias.to_string(), new_command.to_string());
 
-        let toml_string = toml::to_string(&config)
-            .map_err(|e| format!("Failed to serialize configuration. {}", e))?;
-
-        fs::write(CONFIG_FILENAME, toml_string)
-            .map_err(|e| format!("Failed to write to '{}'. {}", CONFIG_FILENAME, e))?;
+        save_config(&config)?;
 
         println!("Successfully edited alias '{}'.", alias);
 

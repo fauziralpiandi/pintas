@@ -1,3 +1,4 @@
+use anyhow::{Context, Result, anyhow};
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -53,9 +54,19 @@ struct Config {
     aliases: HashMap<String, String>,
 }
 
-fn main() {
+fn main() -> Result<()> {
     let cli = Cli::parse();
-    let result = match &cli.command {
+
+    if let Err(e) = run_command(&cli.command) {
+        eprintln!("Error: {:?}", e);
+        exit(1);
+    }
+
+    Ok(())
+}
+
+fn run_command(command: &Commands) -> Result<()> {
+    match command {
         Commands::Run {
             alias,
             args,
@@ -66,31 +77,25 @@ fn main() {
         Commands::Add { alias, command } => add_alias(alias, command),
         Commands::Edit { alias, command } => edit_alias(alias, command),
         Commands::Remove { alias } => remove_alias(alias),
-    };
-
-    if let Err(e) = result {
-        eprintln!("Error: {}", e);
-        exit(1);
     }
 }
 
-fn init_shell(shell: &str) -> Result<(), String> {
+fn init_shell(shell: &str) -> Result<()> {
     let current_exe = env::current_exe()
-        .map_err(|e| format!("Failed to get current executable path: {}", e))?
+        .context("Failed to get current executable path")?
         .to_string_lossy()
         .to_string();
 
     match shell {
         "bash" => {
             println!(
-                r#"
-# pintas shell integration for bash
+                r#"# pintas shell integration for bash
 # Add the following line to your ~/.bashrc:
-#   eval "$("{pintas_path}" init bash)"
+#   eval "$({{\"pintas_path\"}} init bash)"
 
 command_not_found_handler() {{
   "{pintas_path}" run --internal "$@"
-  local exit_code=$?
+  local exit_code=$? 
 
   if [ $exit_code -eq 126 ]; then
     printf 'bash: %s: command not found\n' "$1" >&2
@@ -102,30 +107,30 @@ command_not_found_handler() {{
 "#,
                 pintas_path = current_exe
             );
+
             Ok(())
         }
-        _ => Err(format!("Shell '{}' not supported.", shell)),
+        _ => Err(anyhow!("Shell '{}' not supported.", shell)),
     }
 }
 
-fn load_config() -> Result<Config, String> {
+fn load_config() -> Result<Config> {
     let content = fs::read_to_string(CONFIG_FILENAME)
-        .map_err(|_| format!("Configuration file '{}' not found.", CONFIG_FILENAME))?;
+        .with_context(|| format!("Configuration file '{}' not found.", CONFIG_FILENAME))?;
 
-    toml::from_str(&content).map_err(|e| format!("Failed to parse '{}'. {}", CONFIG_FILENAME, e))
+    toml::from_str(&content).with_context(|| format!("Failed to parse '{}'.", CONFIG_FILENAME))
 }
 
-fn save_config(config: &Config) -> Result<(), String> {
-    let toml_string =
-        toml::to_string(config).map_err(|e| format!("Failed to serialize configuration. {}", e))?;
+fn save_config(config: &Config) -> Result<()> {
+    let toml_string = toml::to_string(config).context("Failed to serialize configuration.")?;
 
     fs::write(CONFIG_FILENAME, toml_string)
-        .map_err(|e| format!("Failed to write to '{}'. {}", CONFIG_FILENAME, e))?;
+        .with_context(|| format!("Failed to write to '{}'.", CONFIG_FILENAME))?;
 
     Ok(())
 }
 
-fn list_aliases() -> Result<(), String> {
+fn list_aliases() -> Result<()> {
     let config = load_config()?;
 
     println!("Available aliases:");
@@ -145,17 +150,17 @@ fn list_aliases() -> Result<(), String> {
     Ok(())
 }
 
-fn run_alias(alias: &str, args: &[String], internal: bool) -> Result<(), String> {
+fn run_alias(alias: &str, args: &[String], internal: bool) -> Result<()> {
     let config = match load_config() {
         Ok(cfg) => cfg,
         Err(_) if internal => exit(126), // config not found, so alias can't exist
-        Err(e) => return Err(e),
+        Err(e) => return Err(e).context("Failed to load pintas config"),
     };
 
     let command_to_run = match config.aliases.get(alias) {
         Some(cmd) => cmd,
         None if internal => exit(126), // alias not found
-        None => return Err(format!("Alias '{}' not found.", alias)),
+        None => return Err(anyhow!("Alias '{}' not found.", alias)),
     };
 
     if !internal {
@@ -169,16 +174,14 @@ fn run_alias(alias: &str, args: &[String], internal: bool) -> Result<(), String>
     cmd.arg(alias); // this becomes $0 in the script
     cmd.args(args); // these become $1, $2, ...
 
-    let status = cmd
-        .status()
-        .map_err(|e| format!("Failed to execute command: {}", e))?;
+    let status = cmd.status().context("Failed to execute command")?;
 
     if internal {
         exit(status.code().unwrap_or(1));
     }
 
     if !status.success() {
-        return Err(format!(
+        return Err(anyhow!(
             "Command finished with an error (exit code: {})",
             status
         ));
@@ -187,11 +190,13 @@ fn run_alias(alias: &str, args: &[String], internal: bool) -> Result<(), String>
     Ok(())
 }
 
-fn add_alias(alias: &str, command: &str) -> Result<(), String> {
+fn add_alias(alias: &str, command: &str) -> Result<()> {
     let mut config = match load_config() {
         Ok(cfg) => cfg,
         Err(e) => {
-            if e.contains("not found") {
+            // if the error is because the file is not found, create a new config.
+            // otherwise, propagate the error.
+            if e.root_cause().is::<std::io::Error>() {
                 Config::default()
             } else {
                 return Err(e);
@@ -200,7 +205,7 @@ fn add_alias(alias: &str, command: &str) -> Result<(), String> {
     };
 
     if config.aliases.contains_key(alias) {
-        return Err(format!(
+        return Err(anyhow!(
             "Alias '{}' already exists. Use 'edit' to modify it.",
             alias
         ));
@@ -217,7 +222,7 @@ fn add_alias(alias: &str, command: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn edit_alias(alias: &str, new_command: &str) -> Result<(), String> {
+fn edit_alias(alias: &str, new_command: &str) -> Result<()> {
     let mut config = load_config()?;
 
     if config.aliases.contains_key(alias) {
@@ -231,11 +236,11 @@ fn edit_alias(alias: &str, new_command: &str) -> Result<(), String> {
 
         Ok(())
     } else {
-        Err(format!("Alias '{}' not found. Cannot edit.", alias))
+        Err(anyhow!("Alias '{}' not found. Cannot edit.", alias))
     }
 }
 
-fn remove_alias(alias: &str) -> Result<(), String> {
+fn remove_alias(alias: &str) -> Result<()> {
     let mut config = load_config()?;
 
     if config.aliases.remove(alias).is_some() {
@@ -245,6 +250,6 @@ fn remove_alias(alias: &str) -> Result<(), String> {
 
         Ok(())
     } else {
-        Err(format!("Alias '{}' not found.", alias))
+        Err(anyhow!("Alias '{}' not found.", alias))
     }
 }

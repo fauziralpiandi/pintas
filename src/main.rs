@@ -114,7 +114,16 @@ fn run_alias(alias: &str) -> Result<(), String> {
 }
 
 fn add_alias(alias: &str, command: &str) -> Result<(), String> {
-  let mut config = load_config().unwrap_or_default();
+  let mut config = match load_config() {
+    Ok(cfg) => cfg,
+    Err(e) => {
+      if e.contains("not found") {
+        Config::default()
+      } else {
+        return Err(e);
+      }
+    }
+  };
 
   config
     .aliases

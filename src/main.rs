@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::env;
 use std::fs;
 use std::process::{Command as OsCommand, exit};
 
@@ -74,16 +75,21 @@ fn main() {
 }
 
 fn init_shell(shell: &str) -> Result<(), String> {
+    let current_exe = env::current_exe()
+        .map_err(|e| format!("Failed to get current executable path: {}", e))?
+        .to_string_lossy()
+        .to_string();
+
     match shell {
         "bash" => {
             println!(
                 r#"
 # pintas shell integration for bash
 # Add the following line to your ~/.bashrc:
-#   eval "$(pintas init bash)"
+#   eval "$("{pintas_path}" init bash)"
 
 command_not_found_handler() {{
-  pintas run --internal "$@"
+  "{pintas_path}" run --internal "$@"
   local exit_code=$?
 
   if [ $exit_code -eq 126 ]; then
@@ -93,7 +99,8 @@ command_not_found_handler() {{
     return $exit_code
   fi
 }}
-"#
+"#,
+                pintas_path = current_exe
             );
             Ok(())
         }

@@ -1,2 +1,2 @@
 [aliases]
-test = "this is the new command"
+greet = "echo Hello, world!"

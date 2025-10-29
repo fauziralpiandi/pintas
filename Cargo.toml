@@ -1,6 +1,7 @@
 [package]
 name = "pintas"
 edition = "2024"
+license = "MIT"
 
 [dependencies]
 clap = { version = "4.5.4", features = ["derive"] }

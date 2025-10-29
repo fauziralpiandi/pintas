@@ -125,10 +125,16 @@ fn add_alias(alias: &str, command: &str) -> Result<(), String> {
         }
     };
 
+    if config.aliases.contains_key(alias) {
+        return Err(format!(
+            "Alias '{}' already exists. Use 'edit' to modify it.",
+            alias
+        ));
+    }
+
     config
         .aliases
         .insert(alias.to_string(), command.to_string());
-
     let toml_string = toml::to_string(&config)
         .map_err(|e| format!("Failed to serialize configuration. {}", e))?;
 

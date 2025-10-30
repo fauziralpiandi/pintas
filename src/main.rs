@@ -16,7 +16,7 @@ struct Cli {
     command: Commands,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Clone)]
 enum Commands {
     Run {
         #[arg(required = true)]
@@ -49,7 +49,7 @@ enum Commands {
     },
 }
 
-#[derive(Deserialize, Serialize, Default)]
+#[derive(Deserialize, Serialize, Default, Clone)]
 struct Config {
     aliases: HashMap<String, String>,
 }
@@ -57,7 +57,7 @@ struct Config {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    if let Err(e) = run_command(&cli.command) {
+    if let Err(e) = run_command(cli.command) {
         eprintln!("Error: {:?}", e);
         exit(1);
     }
@@ -65,19 +65,45 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn run_command(command: &Commands) -> Result<()> {
+fn run_command(command: Commands) -> Result<()> {
     match command {
         Commands::Run {
             alias,
             args,
             internal,
-        } => run_alias(alias, args, *internal),
-        Commands::Init { shell } => init_shell(shell),
-        Commands::List => list_aliases(),
-        Commands::Add { alias, command } => add_alias(alias, command),
-        Commands::Edit { alias, command } => edit_alias(alias, command),
-        Commands::Remove { alias } => remove_alias(alias),
+        } => run_alias(alias, args, internal),
+        Commands::Init { shell } => init_shell(&shell),
+        Commands::List => run_readonly_command(command),
+        Commands::Add { .. } | Commands::Edit { .. } | Commands::Remove { .. } => {
+            run_mutating_command(command)
+        }
     }
+}
+
+fn run_readonly_command(command: Commands) -> Result<()> {
+    let config = load_config()?;
+
+    match command {
+        Commands::List => list_aliases(&config),
+        _ => unreachable!(),
+    }
+}
+
+fn run_mutating_command(command: Commands) -> Result<()> {
+    let mut config = if let Commands::Add { .. } = command {
+        load_config().unwrap_or_default()
+    } else {
+        load_config()?
+    };
+
+    match command {
+        Commands::Add { alias, command } => add_alias(&mut config, &alias, &command)?,
+        Commands::Edit { alias, command } => edit_alias(&mut config, &alias, &command)?,
+        Commands::Remove { alias } => remove_alias(&mut config, &alias)?,
+        _ => unreachable!(),
+    }
+
+    save_config(&config)
 }
 
 fn init_shell(shell: &str) -> Result<()> {
@@ -89,9 +115,10 @@ fn init_shell(shell: &str) -> Result<()> {
     match shell {
         "bash" => {
             println!(
-                r#"# pintas shell integration for bash
+                r#" 
+# pintas shell integration for bash
 # Add the following line to your ~/.bashrc:
-#   eval "$({{\"pintas_path\"}} init bash)"
+#   eval $("{pintas_path}" init bash)
 
 command_not_found_handler() {{
   "{pintas_path}" run --internal "$@"
@@ -110,6 +137,7 @@ command_not_found_handler() {{
 
             Ok(())
         }
+
         _ => Err(anyhow!("Shell '{}' not supported.", shell)),
     }
 }
@@ -130,17 +158,15 @@ fn save_config(config: &Config) -> Result<()> {
     Ok(())
 }
 
-fn list_aliases() -> Result<()> {
-    let config = load_config()?;
-
+fn list_aliases(config: &Config) -> Result<()> {
     println!("Available aliases:");
 
     if config.aliases.is_empty() {
         println!("No aliases found.");
     } else {
-        let mut sorted_aliases: Vec<_> = config.aliases.into_iter().collect();
+        let mut sorted_aliases: Vec<_> = config.aliases.iter().collect();
 
-        sorted_aliases.sort_by(|a, b| a.0.cmp(&b.0));
+        sorted_aliases.sort_by(|a, b| a.0.cmp(b.0));
 
         for (alias, command) in sorted_aliases {
             println!(" - {}: \"{}\"", alias, command);
@@ -150,14 +176,14 @@ fn list_aliases() -> Result<()> {
     Ok(())
 }
 
-fn run_alias(alias: &str, args: &[String], internal: bool) -> Result<()> {
+fn run_alias(alias: String, args: Vec<String>, internal: bool) -> Result<()> {
     let config = match load_config() {
         Ok(cfg) => cfg,
         Err(_) if internal => exit(126), // config not found, so alias can't exist
         Err(e) => return Err(e).context("Failed to load pintas config"),
     };
 
-    let command_to_run = match config.aliases.get(alias) {
+    let command_to_run = match config.aliases.get(&alias) {
         Some(cmd) => cmd,
         None if internal => exit(126), // alias not found
         None => return Err(anyhow!("Alias '{}' not found.", alias)),
@@ -182,7 +208,7 @@ fn run_alias(alias: &str, args: &[String], internal: bool) -> Result<()> {
 
     if !status.success() {
         return Err(anyhow!(
-            "Command finished with an error (exit code: {})",
+            "Command finished with an error (exit code: {})\n",
             status
         ));
     }
@@ -190,20 +216,7 @@ fn run_alias(alias: &str, args: &[String], internal: bool) -> Result<()> {
     Ok(())
 }
 
-fn add_alias(alias: &str, command: &str) -> Result<()> {
-    let mut config = match load_config() {
-        Ok(cfg) => cfg,
-        Err(e) => {
-            // if the error is because the file is not found, create a new config.
-            // otherwise, propagate the error.
-            if e.root_cause().is::<std::io::Error>() {
-                Config::default()
-            } else {
-                return Err(e);
-            }
-        }
-    };
-
+fn add_alias(config: &mut Config, alias: &str, command: &str) -> Result<()> {
     if config.aliases.contains_key(alias) {
         return Err(anyhow!(
             "Alias '{}' already exists. Use 'edit' to modify it.",
@@ -215,22 +228,16 @@ fn add_alias(alias: &str, command: &str) -> Result<()> {
         .aliases
         .insert(alias.to_string(), command.to_string());
 
-    save_config(&config)?;
-
     println!("Successfully added alias '{}'.", alias);
 
     Ok(())
 }
 
-fn edit_alias(alias: &str, new_command: &str) -> Result<()> {
-    let mut config = load_config()?;
-
+fn edit_alias(config: &mut Config, alias: &str, new_command: &str) -> Result<()> {
     if config.aliases.contains_key(alias) {
         config
             .aliases
             .insert(alias.to_string(), new_command.to_string());
-
-        save_config(&config)?;
 
         println!("Successfully edited alias '{}'.", alias);
 
@@ -240,12 +247,8 @@ fn edit_alias(alias: &str, new_command: &str) -> Result<()> {
     }
 }
 
-fn remove_alias(alias: &str) -> Result<()> {
-    let mut config = load_config()?;
-
+fn remove_alias(config: &mut Config, alias: &str) -> Result<()> {
     if config.aliases.remove(alias).is_some() {
-        save_config(&config)?;
-
         println!("Successfully removed alias '{}'.", alias);
 
         Ok(())

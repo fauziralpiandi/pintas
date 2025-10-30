@@ -6,7 +6,56 @@ use std::env;
 use std::fs;
 use std::process::{Command as OsCommand, exit};
 
+use std::path::PathBuf;
+
 const CONFIG_FILENAME: &str = "pintas.toml";
+
+fn get_pintas_dir() -> Result<PathBuf> {
+    let home = env::var("HOME").context("Failed to get HOME directory from environment")?;
+
+    Ok(PathBuf::from(home).join(".pintas"))
+}
+
+fn get_shims_dir() -> Result<PathBuf> {
+    Ok(get_pintas_dir()?.join("shims"))
+}
+
+fn sync_shims(config: &Config) -> Result<()> {
+    let pintas_path = env::current_exe().context("Failed to get current executable path")?;
+    let shims_dir = get_shims_dir()?;
+
+    fs::create_dir_all(&shims_dir).context("Failed to create shims directory")?;
+
+    // a simple approach to remove all shims before recreating them
+    // less efficient than comparing, but simpler and more robust
+    for entry in fs::read_dir(&shims_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        if path.is_file() {
+            fs::remove_file(path)?;
+        }
+    }
+
+    for alias in config.aliases.keys() {
+        let shim_path = shims_dir.join(alias);
+        let shim_content = format!(
+            "#!/bin/sh\nexec \"{}\" run --internal \"{}\" \"$@\"",
+            pintas_path.to_string_lossy(),
+            alias
+        );
+
+        fs::write(&shim_path, shim_content)?;
+
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(&shim_path, fs::Permissions::from_mode(0o755))?;
+    }
+
+    // println!("Successfully synced aliases.");
+
+    Ok(())
+}
 
 #[derive(Parser)]
 #[command(name = "pintas")]
@@ -47,6 +96,7 @@ enum Commands {
         #[arg(required = true)]
         alias: String,
     },
+    Sync,
 }
 
 #[derive(Deserialize, Serialize, Default, Clone)]
@@ -59,6 +109,7 @@ fn main() -> Result<()> {
 
     if let Err(e) = run_command(cli.command) {
         eprintln!("Error: {:?}", e);
+
         exit(1);
     }
 
@@ -74,6 +125,7 @@ fn run_command(command: Commands) -> Result<()> {
         } => run_alias(alias, args, internal),
         Commands::Init { shell } => init_shell(&shell),
         Commands::List => run_readonly_command(command),
+        Commands::Sync => sync_shims(&load_config()?),
         Commands::Add { .. } | Commands::Edit { .. } | Commands::Remove { .. } => {
             run_mutating_command(command)
         }
@@ -103,36 +155,20 @@ fn run_mutating_command(command: Commands) -> Result<()> {
         _ => unreachable!(),
     }
 
-    save_config(&config)
+    save_config(&config)?;
+    sync_shims(&config)
 }
 
 fn init_shell(shell: &str) -> Result<()> {
-    let current_exe = env::current_exe()
-        .context("Failed to get current executable path")?
-        .to_string_lossy()
-        .to_string();
+    let shims_dir = get_shims_dir()?;
+
+    fs::create_dir_all(&shims_dir).context("Failed to create shims directory")?;
 
     match shell {
         "bash" => {
             println!(
-                r#" 
-# pintas shell integration for bash
-# Add the following line to your ~/.bashrc:
-#   eval $("{pintas_path}" init bash)
-
-command_not_found_handler() {{
-  "{pintas_path}" run --internal "$@"
-  local exit_code=$? 
-
-  if [ $exit_code -eq 126 ]; then
-    printf 'bash: %s: command not found\n' "$1" >&2
-    return 127
-  else
-    return $exit_code
-  fi
-}}
-"#,
-                pintas_path = current_exe
+                "# pintas shell integration for bash\n#\n# Add the following line to your ~/.bashrc or ~/.profile:\n#\n  export PATH=\"{}\":$PATH\n",
+                shims_dir.to_string_lossy()
             );
 
             Ok(())
